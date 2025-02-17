@@ -1,0 +1,97 @@
+
+1. INSTALL Anaconda.
+   See https://www.anaconda.com/download.
+
+2. (Optional) create a new environment for splicedfep.
+   > conda create -n splicedfep python=3.10
+   > conda activate splicedfep
+
+3. INSTALL essential libraries.
+   > pip install mdtraj
+   > conda install pandas
+   > conda install modeller -c salilab
+      (Then follow the reminder to edit license key, ask for developers if you need.)
+
+4. Add the source path of splicedfep to the environment, i.e. the root path of this file.
+   > SRCPATH=`pwd`
+   > export PATH=$SRCPATH:$PATH
+
+5. Prepare for FEP.
+    Check necessities for FEP.
+    > splicedfep.prepare -h
+
+    Make sure that GROMACS has been installed, and the command is "gmx".
+    > which gmx
+
+    Change current path to the workplace.
+    > cd $WORKPATH
+
+    Make a new directory "SEQUENCE.notes" for the original sequence. (e.g. GILGFVFTL.xxx)
+    > mkdir GILGFVFTL.xxx
+    > cd GILGFVFTL.xxx
+
+    Place the PDB file of the original structure in this directory, name it as "SEQUENCE.pdb".
+    > touch GILGFVFTL.pdb
+
+    Try a simple example for FEP preparations.
+    > splicedfep.prepare -l I2A -q
+
+    (Ask developers for more advanced examples.)
+
+6. Run FEP on cluster node. (Temporarily permitted.)
+    Log in cluster node.
+    > ssh node17
+
+    Make sure that MPI version of GROMACS has been installed, and the command is "gmx_mpi".
+    > which gmx_mpi
+
+    Check parameters for FEP runs.
+    > splicedfep.mpirun -h
+
+    Run in the background.
+    > nohup splicedfep.mpirun --arc > splicedfep.log &
+
+7. Run FEP using SLURM. (Temporarily useless.)
+    Add your SBTACH parameters into the head of splicedfep.mpirun. For example as follows, and name the script as splicedfep.mpirun.slurm:
+      !/usr/bin/env python
+      #SBATCH -J splicedfep
+      #SBATCH -p debug
+      #SBATCH -t 1:00:00
+      #SBATCH -N 1
+      #SBATCH -n 1
+      #SBATCH --cpus-per-task=66
+      #SBATCH --gres=gpu:2
+      #SBATCH -o /public/SHARE/zhong/%j.log
+      #SBATCH -e /public/SHARE/zhong/%j.log
+
+    Note that SLURM is unable to automatically find the source path of splicedfep, so your source path should be specifiedby {--src} in the next RUN step everytime.
+
+    Run using SBATCH. Make sure that parameters for splicedfep.mpirun and SBATCH are the same.
+    > sbatch splicedfep.mpirun.slurm -g 2 -p 16 -t 4 --src /public/SHARE/zhong/splicedfep
+
+8. Analyze using alchemical_analysis.
+    INSTALL alchemical_analysis.
+    > conda create -n pymbar python=2.7 matplotlib
+    > conda activate pymbar
+    > conda install -c conda-forge pymbar
+    > pip install pathlib2
+    > git clone https://github.com/MobleyLab/alchemical-analysis.git
+    > cd alchemical-analysis
+    > pip install -e .
+    > vim alchemical_analysis/alchemical_analysis.py
+       line 334: O = MBAR.computeOverlap()['matrix']
+
+    Analyze free energy changes.
+    > cd $WORKPATH
+    > conda activate pymbar
+    > calcmbar
+    > conda deactivate
+
+9. Report dG results.
+    > cd $WORKPATH
+    Alternative 1:
+    > calcddg -s GILGFVFTL
+    Alternative 2:
+    > cd GILGFVFTL.xxx
+    > calcddg
+

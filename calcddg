@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+
+title    = 'calcddg'
+version  = '2.3.2'
+update   = '2024-08-30'
+platform = 'cluster'
+
+#------------------------------------------------------------------------------
+import os,sys
+from glob import glob,iglob
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('-s', '--seq', default=None, type=str, metavar='None', nargs='*',
+                    help='')
+parser.add_argument('-m', '--method', default=['MBAR'], type=str, metavar='MBAR', nargs='*',
+                    help='(enumerable) TI, TI-CUBIC, DEXP, IEXP, BAR, MBAR')
+parser.add_argument('-d', '--developer', action='store_true',
+                    help='developer mode')
+args = parser.parse_args()
+print (args)
+
+Dict_Method = {'TI':0, 'TI-CUBIC':1, 'DEXP':2, 'IEXP':3, 'BAR':4, 'MBAR':5}
+
+def Mutseq(seq, mutlabel):
+  tmpseq = list(seq)
+  ms = mutlabel.split('+')
+  for s in ms:
+    assert len(s)==3, 'Mutant label is wrong.'
+    i = int(s[1])-1
+    assert tmpseq[i] == s[0], 'Mutant label is wrong.'
+    #assert s[2] in rlist, 'Mutant label is wrong.'
+    tmpseq[i] = s[2]
+  tmpseq = ''.join(tmpseq)
+  return tmpseq, len(ms)
+
+def ReadResult(filename):
+  with open(filename,'r') as f: frl = f.readlines()
+  frls = frl[-1].split()
+  dg = np.array(frls[1::3]).astype('float')
+  return dg
+  #se = np.array(frls[3::3]).astype('float')
+  #return np.array([dg,se])
+
+
+print ('           Label         dG1             dG2             dG3            ddG2-1          ddG3-2       method   path')
+prefix = os.getcwd()
+paths = ['']
+if args.seq is not None:
+  for x in args.seq:
+    paths = paths + glob('**/%s*' %x, recursive=True)
+
+for path in paths:
+  ppath = '%s/%s' %(prefix, path)
+  if not os.path.isdir(ppath) : continue
+  os.chdir(ppath)
+  for mut in sorted(glob('*')):
+    os.chdir(ppath)
+    if not os.path.isdir(mut) : continue
+    os.chdir(mut)
+
+    # N,6
+    #dg1 = np.array([ReadResult(x)  for x in iglob('free/w*/xvg/results.txt')])
+    #dg2 = np.array([ReadResult(x)  for x in iglob('complex/w*/xvg/results.txt')])
+    #dg3 = np.array([ReadResult(x)  for x in iglob('trimer/w*/xvg/results.txt')])
+    if args.developer:
+      dg1 = np.array([ ReadResult(x)  for x in iglob('free/w*/xvg/results.txt')] +
+                     [-ReadResult(x)  for x in iglob('free/r*/xvg/results.txt')])
+      dg2 = np.array([ ReadResult(x)  for x in iglob('complex/w*/xvg/results.txt')] +
+                     [-ReadResult(x)  for x in iglob('complex/r*/xvg/results.txt')])
+      dg3 = np.array([ ReadResult(x)  for x in iglob('trimer/w*/xvg/results.txt')] +
+                     [-ReadResult(x)  for x in iglob('trimer/r*/xvg/results.txt')])
+    else:
+      dg1 = np.array([ReadResult(x)  for x in iglob('free/w*/xvg/results.txt')])
+      dg2 = np.array([ReadResult(x)  for x in iglob('complex/w*/xvg/results.txt')])
+      dg3 = np.array([ReadResult(x)  for x in iglob('trimer/w*/xvg/results.txt')])
+
+    if dg1.shape[0] + dg2.shape[0] + dg3.shape[0] == 0 : continue
+    dg1m=dg1e=dg2m=dg2e=dg3m=dg3e = np.ones([6]) * np.inf
+    if dg1.shape[0] > 0: dg1m, dg1e = dg1.mean(0), dg1.std(0)
+    if dg2.shape[0] > 0: dg2m, dg2e = dg2.mean(0), dg2.std(0)
+    if dg3.shape[0] > 0: dg3m, dg3e = dg3.mean(0), dg3.std(0)
+    ddg21m = dg2m - dg1m
+    ddg21e = (dg2e**2 + dg1e**2) **0.5
+    ddg32m = dg3m - dg2m
+    ddg32e = (dg3e**2 + dg2e**2) **0.5
+    #ddg31m = dg3m - dg1m
+    #ddg31e = (dg3e**2 + dg1e**2) **0.5
+
+    for m in args.method:
+      Dm = Dict_Method[m]
+      print ('%16s  %7.2f +-%5.2f %7.2f +-%5.2f %7.2f +-%5.2f %7.2f +-%5.2f %7.2f +-%5.2f  %8s %s' %(
+        mut,dg1m[Dm],dg1e[Dm],dg2m[Dm],dg2e[Dm],dg3m[Dm],dg3e[Dm],ddg21m[Dm],ddg21e[Dm],ddg32m[Dm],ddg32e[Dm],m,path))
+

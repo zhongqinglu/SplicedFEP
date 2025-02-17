@@ -1,0 +1,30 @@
+
+2.0.0
+ - Update FEP strategy for residue insertion/deletion.
+
+2.0.1
+ - Check consistency of the sequence and the input structure.
+
+2.1.0
+ - Update for amber14sb force field.
+
+2.1.1
+ - Add an unnatural residue type BTA for amber14sb force field.
+ - Add an example 1_hhat.
+
+2.2.0
+ - Update default QPATH to a public path /public/SHARE/zhong/Queue.
+
+2.2.1
+ - Update SLURM version of zhongfep.mpirun.
+
+2.3.0
+ - Update user interface of calcddg.
+
+2.3.1
+ - Deprecate and cancle public QPATH in CHANGE-2.2.0.
+
+2.3.2
+ - Fix some bugs.
+ - Rename zhongfep as splicedfep.
+

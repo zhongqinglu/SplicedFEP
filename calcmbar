@@ -1,0 +1,20 @@
+#!/bin/bash
+
+#title    = 'calcmbar'
+#version  = '1.1'
+#update   = '2024-01-18'
+#platform = 'cluster'
+
+#------------------------------------------------------------------------------
+#conda activate pymbar
+which alchemical_analysis || exit
+
+for i in `find -name xvg`
+do
+  echo $i
+  if test ! -e $i/results.txt; then
+    #alchemical_analysis -d $i -g -w -s 1000 -u kcal
+    alchemical_analysis -d $i -g -w -u kcal -t 310 -s 1000
+  fi
+done
+

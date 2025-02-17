@@ -1,0 +1,679 @@
+#!/usr/bin/env python
+
+title    = 'splicedfep.preprare'
+version  = '2.3.2'
+update   = '2024-08-30'
+platform = 'cluster'
+
+#------------------------------------------------------------------------------
+import os, sys, shutil, subprocess, time
+import numpy as np
+import pandas as pd
+import mdtraj as md
+from glob import glob
+import warnings
+warnings.filterwarnings('ignore')
+rlist = list('ACDEFGHIKLMNPQRSTVWYO')
+
+import logging
+logging.basicConfig(level=logging.DEBUG, format='%(levelname)s\t%(message)s')
+logging.info(os.path.basename(__file__))
+logging.info('Version:  ' + version)
+logging.info('Update:   ' + update)
+logging.info('PID:      ' + '%s'%os.getpid())
+logging.info('Datetime: ' + time.strftime('%Y-%m-%d %H:%M:%S'))
+logging.info('Command:  ' + ' '.join(sys.argv))
+logging.info('-'*50+'\n')
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--src', default=None, type=str, metavar='None',
+                    help='(Optional) Source path. Default is the directory of this script.')
+parser.add_argument('--seq', default=None, type=str, metavar='None',
+                    help='(Optional) Peptide sequence. Default (and recommendation) is the basename of the execution(root) directory.')
+parser.add_argument('--ipdb', default=None, type=str, metavar='None',
+                    help='(Optional) Input PDB file. Default (and recommendation) is {--seq}.pdb in the execution(root) directory. The human leukocyte antigen (HLA), beta-2-microglobulin (B2M), peptide (antigen), T-cell receptor alpha and beta chain (TCR, only for --trimer) must be placed in order in the file.') # 2.0.0
+parser.add_argument('-s', '--mutseq', default=None, type=str, metavar='None',
+                    help='(Optional) Mutant peptide sequence. Alternative options for mutation.')
+parser.add_argument('-l', '--mutlabel', default=None, type=str, metavar='None',
+                    help='(Optional) Mutant label. Alternative options for mutation. e.g. N2A, D3E+Y4Q F3O+S4S+P4P.')
+parser.add_argument('--stype', default='SC', type=str, metavar='SC',
+                    help='Spliced type: (enumerable) SC - backbone-sidechain (CA-CB bond) for spliced site; RES - residue-residue (C-N bond) for spliced site.')
+parser.add_argument('-w', '--win', default=16, type=int, metavar='16',
+                    help='Number of windows for FEP.') # platform
+parser.add_argument('-t', '--trial', default=[0], type=int, metavar='0', nargs='*',
+                    help='Trail ID for FEP, multiple IDs available.') # 1.4.3
+parser.add_argument('--ffpath', default=None, type=str, metavar='None',
+                    help='(Optional) Force-field parent directory. Default (and recommendation) is {--src}/gmxtop.')
+parser.add_argument('--ff', default='charmm36', type=str, metavar='charmm36',
+                    help='Force-field label: (enumerable) charmm36, amber14sb.') # 2.1.0
+parser.add_argument('--mdp', default=None, type=str, metavar='None',
+                    help='(Optional) MDP directory. Default (and recommendation) is {--src}/mdp.')
+parser.add_argument('-q', '--queue', action='store_true',
+                    help='Append QUEUE information for high-throughput run.')
+#parser.add_argument('--qpath', default='/public/SHARE/zhong/Queue', type=str, metavar='/public/SHARE/zhong/Queue',
+#                    help='(Optional) Queue directory.') # 2.2.0
+parser.add_argument('--qpath', default=None, type=str, metavar='None',
+                    help='(Optional) Queue directory. Default (and recommendation) is $HOME/Queue_fep.')
+parser.add_argument('--qclear', action='store_true',
+                    help='Clear queue directory.')
+parser.add_argument('--qstart', default=100, type=int, metavar='100',
+                    help='Where Queue ID starts.') # 1.3.5
+parser.add_argument('--qtype', default=None, type=str, metavar='all possible types', nargs='*',
+                    help='Which states will be appended to the QUEUE: (enumerable) trimer, complex, free.') # 1.3.5  2.0.0
+parser.add_argument('--trimer', action='store_true',
+                    help='{--trimer} for HLA-antigen-TCR system, otherwise for HLA-antigen system.') # 2.0.0
+parser.add_argument('--overwrite', action='store_true',
+                    help='Overwrite the existed files.')
+parser.add_argument('--excall', action='store_true', # 1.4.0
+                    help='Exclusions mode: all or residue-wise. (This option may be related to the coupling mode of FEP, and need to be further studied.)')
+parser.add_argument('--rlist', default=None, type=float, metavar='None',
+                    help='Modify rlist option in MDP files.') # 1.4.2
+parser.add_argument('--usemodeller', action='store_false',
+                    help='Enforce making hybrid structure using MODELLER, rather than existed perturbed structure.') # 1.4.0
+parser.add_argument('--developer', action='store_true',
+                    help='Developer mode.') # 1.3.5
+args = parser.parse_args()
+logging.info(args)
+
+
+# prepare
+assert shutil.which('gmx') is not None, 'gmx not found.'
+
+if args.src is None: args.src = os.path.dirname(__file__)
+logging.info('src path: %s' %args.src)
+assert os.path.exists(args.src), '%s not found' %args.src
+
+#if args.ffpath is None: args.ffpath = '%s/top' %(os.environ["GMXDATA"])
+if args.ffpath is None: args.ffpath = '%s/gmxtop' %args.src
+logging.info('force-field parent path: %s' %args.ffpath)
+assert os.path.exists(args.ffpath), '%s not found' %args.ffpath
+os.environ["GMXLIB"] = args.ffpath
+
+if args.mdp is None: args.mdp = '%s/mdp' %(args.src)
+#if args.developer: args.mdp = '%s/mdp.dev' %(args.src) # developer 1.3.5
+logging.info('mdp path: %s' %args.mdp)
+assert os.path.exists(args.mdp), '%s not found' %args.mdp
+workflow = ['em','nvt','md']
+for x in workflow + ['fep']:
+  assert os.path.exists('%s/%s.mdp' %(args.mdp, x)), '%s.mdp not found' %(x)
+
+rpath = os.getcwd()
+logging.info('root path: %s' %rpath)
+
+logging.info('-'*50+'\n')
+
+
+if args.seq is None: args.seq = os.path.basename(rpath).split('.')[0] # 1.3.6
+logging.info('peptide sequence: %s' %args.seq)
+
+if args.ipdb is None: args.ipdb = '%s.pdb' %(args.seq)
+logging.info('input PDB file: %s' %args.ipdb)
+assert os.path.exists(args.ipdb), '%s not found' %args.ipdb
+
+def BASH(cmd):
+  subprocess.run(cmd, check=True, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+Dict_AA13 = {'A':'ALA', 'C':'CYS', 'D':'ASP', 'E':'GLU', 'F':'PHE', 'G':'GLY', 'H':'HIS', 'I':'ILE', 'K':'LYS', 'L':'LEU', 'M':'MET', 'N':'ASN', 'P':'PRO', 'Q':'GLN', 'R':'ARG', 'S':'SER', 'T':'THR', 'V':'VAL', 'W':'TRP', 'Y':'TYR'}
+
+# 2.1.1
+Dict_AA13['B'] = 'BTA'
+rlist.append('B')
+
+# 2.0.0
+if args.trimer: fep_list = ['trimer','complex','free']
+else: fep_list = ['complex','free']
+if args.qtype is None: args.qtype = fep_list
+
+
+# test original structure
+if args.trimer: chain_list = list('ABCDE') # 2.0.0
+else: chain_list = list('ABC')
+if args.overwrite or not all([os.path.exists('conf.%s.pdb'%x)  for x in chain_list]):
+  fi = open(args.ipdb, 'r')
+  fo = [open('conf.%s.pdb'%x, 'w')  for x in chain_list]
+  chain = -1
+  last_residue = np.inf
+  for line in fi:
+    if line.startswith("ATOM") or line.startswith("HETATM"):
+      resname = line[17:20].strip()
+      if resname == "SOL" : break
+      residue = int(line[22:26].strip())
+      if residue < last_residue :
+        chain += 1
+        chainid = chr(chain+65)
+        #assert chainid in chain_list, 'PDB chain ID is wrong.'
+      line = line[:21] + chainid + line[22:]
+      fo[chain].write(line)
+      last_residue = residue
+  fi.close()
+  for f in fo: f.close()
+  logging.info('conf file: conf.{chainid}.pdb')
+else:
+  logging.info('conf file existed: conf.{chainid}.pdb')
+
+
+# original structure
+if args.overwrite or not os.path.exists('pdb2gmx/conf.pdb'):
+  os.makedirs('pdb2gmx', exist_ok=True)
+  tmpstr = ' '.join(['conf.%s.pdb'%x  for x in chain_list])
+  BASH("cat %s > pdb2gmx/prepare.pdb" %tmpstr) # 2.0.0
+  os.chdir('pdb2gmx')
+  logging.info('current path: %s' %(os.getcwd()))
+  BASH('gmx pdb2gmx -f prepare.pdb -ignh -ff %s -water tip3p -o conf.pdb' %(args.ff))
+  logging.info('original conf file: pdb2gmx/conf.pdb')
+  os.chdir('..')
+  logging.info('current path: %s' %(os.getcwd()))
+else:
+  logging.info('original conf file existed: pdb2gmx/conf.pdb')
+
+
+# mutant information
+assert (args.mutseq is not None) or (args.mutlabel is not None), 'No mutation information.'
+# 1.4.0
+if args.mutlabel is not None:
+  tmpseq = list(args.seq)
+  tmpbool = [False]*len(tmpseq)
+  DictAB = list(range(len(tmpseq)+1))
+  for s in args.mutlabel.split('+'):
+    assert len(s)==3, 'Mutant label is wrong.'
+    i = int(s[1])-1
+    assert tmpseq[i] == s[0], 'Mutant label is wrong.'
+    assert s[2] in rlist, 'Mutant label is wrong.'
+    tmpseq[i] = s[2]
+    tmpbool[i] = True
+  mutidA = list( np.where(tmpbool)[0] + 1 )
+  for i in np.where(np.array(tmpseq)=='O')[0][::-1]:
+    del(tmpseq[i])
+    del(tmpbool[i])
+    del(DictAB[i+1])
+  mutidB = list( np.where(tmpbool)[0] + 1 )
+  tmpseq = ''.join(tmpseq)
+  if args.mutseq is not None:
+    assert args.mutseq == tmpseq, 'Mutant sequence and label are not consistent.'
+  else:
+    args.mutseq = tmpseq
+  #print (mutidA, mutidB, DictAB)
+# 1.3.6
+else:
+  assert args.seq != args.mutseq, 'Original and mutant sequence are the same.'
+  assert len(args.seq) == len(args.mutseq), 'Original and mutant sequence are not in same length.'
+  tmplabel = ''
+  mutidA, mutidB = [], []
+  for i in range(len(args.seq)):
+    if args.seq[i] != args.mutseq[i]:
+      mutidA.append(i+1)
+      mutidB.append(i+1)
+      tmplabel = tmplabel + args.seq[i] + '%s'%(i+1) + args.mutseq[i] + '+'
+  args.mutlabel = tmplabel[:-1]
+  DictAB = list(range(len(args.seq)+1))
+
+if 'G' in args.mutlabel or 'P' in args.mutlabel: args.stype = 'RES'  # 1.4.3
+logging.info('mutant sequence: %s' %args.mutseq)
+logging.info('mutant label: %s' %args.mutlabel)
+logging.info('mutant spliced type: %s' %args.stype) # 1.4.3
+
+
+# target structure
+if len(args.mutlabel) > 0 : # 1.3.6
+  if args.overwrite or not os.path.exists('%s/pdb2gmx/conf.pdb' %(args.mutlabel)):
+    os.makedirs('%s/pdb2gmx' %(args.mutlabel), exist_ok=True)
+    if args.usemodeller and os.path.exists('%s.pdb' %(args.mutseq)): # 1.4.0
+      BASH("cp %s.pdb %s/pdb2gmx/prepare.pdb" %(args.mutseq, args.mutlabel))
+      os.chdir('%s/pdb2gmx' %(args.mutlabel))
+      logging.info('current path: %s' %(os.getcwd()))
+      logging.info('copying prepared mutant structure')
+    else:
+      tmpstr = ' '.join(['conf.%s.pdb'%x  for x in chain_list])
+      BASH("cat %s > %s/pdb2gmx/pre.pdb" %(tmpstr, args.mutlabel)) # 2.0.0
+      os.chdir('%s/pdb2gmx' %(args.mutlabel))
+      logging.info('current path: %s' %(os.getcwd()))
+      # patch mutant residue
+      for s in args.mutlabel.split('+'):
+        BASH("sed -i 's/%s C   %s/%s C   %s/' pre.pdb" %(Dict_AA13[s[0]],s[1],Dict_AA13[s[2]],s[1]))
+      # generate mutant structure
+      import modeller
+      from modeller.scripts import complete_pdb
+      from modeller.config import install_dir
+      modeller.log.none() # 1.4.0
+      env = modeller.Environ()
+      env.libs.topology.read('%s/modlib/top_heav.lib' %install_dir)
+      env.libs.parameters.read('%s/modlib/par.lib' %install_dir)
+      mdl = complete_pdb(env, 'pre.pdb', transfer_res_num=True)
+      mdl.write('prepare.pdb')
+      logging.info('generating prepared mutant structure by MODELLER')
+    BASH('gmx pdb2gmx -f prepare.pdb -ignh -ff %s -water tip3p -o conf.pdb' %(args.ff))
+    logging.info('target conf file: %s/pdb2gmx/conf.pdb' %(args.mutlabel))
+    os.chdir('../..')
+    logging.info('current path: %s' %(os.getcwd()))
+  else:
+    logging.info('target conf file existed: %s/pdb2gmx/conf.pdb' %(args.mutlabel))
+
+
+# hybrid structure and topology
+if args.overwrite or not all([os.path.exists('%s/%s/pdb2gmx/ions.gro' %(args.mutlabel,x)) for x in fep_list]): # 2.0.0
+
+  # hybrid topology
+  # define
+  List_mode = ['moleculetype','atoms','bonds','pairs','angles','dihedrals','cmap','exclusions','position_restraints','define']
+
+  def ReadITP(filename):
+    top = {}
+    for k in List_mode: top[k] = []
+    mode = ''
+    with open(filename, 'r') as f:
+      for l in f.readlines():
+        if l.strip() == '' : continue
+        if l.startswith(';') : continue
+        if l.startswith('#') :
+          top['define'].append(l)
+          continue
+        if l.startswith('[') :
+          mode = l.split()[1]
+          continue
+        top[mode].append(l.split(';')[0].split())
+    top['atoms'] = pd.DataFrame(top['atoms'], columns=['aid','atype','rid','rname','aname','cgnr','charge','mass']).astype({'aid':'int', 'atype':'string', 'rid':'int', 'rname':'string', 'aname':'string', 'cgnr':'int', 'charge':'float', 'mass':'float'})
+    top['bonds'] = pd.DataFrame(top['bonds'], columns=['id1','id2','btype']).astype('int')
+    top['pairs'] = pd.DataFrame(top['pairs'], columns=['id1','id2','btype']).astype('int')
+    top['angles'] = pd.DataFrame(top['angles'], columns=['id1','id2','id3','btype']).astype('int')
+    top['dihedrals'] = pd.DataFrame(top['dihedrals'], columns=['id1','id2','id3','id4','btype']).astype('int')
+    top['cmap'] = pd.DataFrame(top['cmap'], columns=['id1','id2','id3','id4','id5','btype']).astype('int')
+    top['atoms'].index = top['atoms']['aid'].tolist()
+    return top
+
+  def WriteITP(top, filename):
+    with open(filename, 'w') as f:
+      for k in List_mode: 
+        #print (k)
+        if k == 'define' : continue
+        f.write('\n[ %s ]\n'%k)
+        if isinstance(top[k], pd.DataFrame):
+          for i in top[k].index:
+            f.write('\t'.join([' %s'%x  for x in top[k].loc[i]  if pd.notna(x)]) + '\n')
+        if isinstance(top[k], list):
+          for i in top[k]:
+            if isinstance(i, list):
+              f.write(' ' + ' '.join([' %s'%x  for x in i]) + '\n')
+            else:
+              f.write(' ' + i)
+
+  def WriteTOP(filename, ffpath, dtpath, feptype): # 2.0.0
+    with open(filename, 'w') as f:
+      f.write('#include "%s/forcefield.itp"\n' %ffpath)
+      f.write('#include "%s/ffn.itp"\n' %dtpath)
+      f.write('#include "%s/ffb.itp"\n' %dtpath)
+      f.write('\n')
+      if feptype in ['complex', 'trimer']:
+        f.write('#include "%s/pdb2gmx/topol_Protein_chain_A.itp"\n' %rpath)
+        f.write('#include "%s/pdb2gmx/topol_Protein_chain_B.itp"\n' %rpath)
+      if feptype in ['free', 'complex', 'trimer']:
+        f.write('#include "%s/dualtop.itp"\n' %dtpath)
+      if feptype in ['trimer']:
+        f.write('#include "%s/pdb2gmx/topol_Protein_chain_D.itp"\n' %rpath)
+        f.write('#include "%s/pdb2gmx/topol_Protein_chain_E.itp"\n' %rpath)
+      f.write('\n')
+      f.write('#include "%s/tip3p.itp"\n' %ffpath)
+      f.write('#include "%s/ions.itp"\n' %ffpath)
+      f.write('\n')
+      f.write('[ system ]\nProtein in water\n\n')
+      f.write('[ molecules ]\n')
+      if feptype in ['complex', 'trimer']:
+        f.write('Protein_chain_A 1\n')
+        f.write('Protein_chain_B 1\n')
+      if feptype in ['free', 'complex', 'trimer']:
+        f.write('Protein_chain_C 1\n')
+      if feptype in ['trimer']:
+        f.write('Protein_chain_D 1\n')
+        f.write('Protein_chain_E 1\n')
+
+
+  # patch ff
+  ff_path = '%s/%s.ff' %(args.ffpath, args.ff)
+  ffn = '%s/ffnonbonded.itp' %ff_path
+  ffb = '%s/ffbonded.itp' %ff_path
+  ffc = '%s/cmap.itp' %ff_path
+
+
+  # load topology A B
+  topA = 'pdb2gmx/topol_Protein_chain_C.itp'
+  if len(args.mutlabel) > 0 :
+    topB = '%s/pdb2gmx/topol_Protein_chain_C.itp' %(args.mutlabel)
+  else:
+    topB = topA
+
+  RA = ReadITP(topA)
+  RB = ReadITP(topB)
+  R = RA.copy()
+
+  dtpath = '%s/%s/dualtop' %(rpath, args.mutlabel)
+  os.makedirs(dtpath, exist_ok=True)
+  os.chdir(dtpath)
+  logging.info('current path: %s' %(os.getcwd()))
+
+
+  # patch atoms
+  if args.stype == 'SC':
+    #bblist = ['N','HN','CA','HA','C','O','H1','H2','H3','OT1','OT2','OXT']
+    bblist = ['N','HN','CA','HA','C','O','H1','H2','H3','OT1','OT2','OXT','H','OC1','OC2'] # 2.1.0
+    selA = RA['atoms'].index[RA['atoms']['rid'].isin(mutidA) & (~RA['atoms']['aname'].isin(bblist))].tolist()
+    selB = RB['atoms'].index[RB['atoms']['rid'].isin(mutidB) & (~RB['atoms']['aname'].isin(bblist))].tolist()
+  if args.stype == 'RES':
+    selA = RA['atoms'].index[RA['atoms']['rid'].isin(mutidA)].tolist()
+    selB = RB['atoms'].index[RB['atoms']['rid'].isin(mutidB)].tolist()
+
+  for i in selA:
+    RA['atoms'].loc[i, 'btype'] = 'DUM_' + RA['atoms'].loc[i, 'atype']
+    RA['atoms'].loc[i, 'bcharge'] = 0.0
+    RA['atoms'].loc[i, 'bmass'] = RA['atoms'].loc[i, 'mass']
+
+  RB['atoms'].rename(columns={'atype':'btype', 'charge':'bcharge', 'mass':'bmass'}, inplace=True)
+  for i in selB:
+    RB['atoms'].loc[i, 'atype'] = 'DUM_' + RB['atoms'].loc[i, 'btype']
+    RB['atoms'].loc[i, 'charge'] = 0.0
+    RB['atoms'].loc[i, 'mass'] = RB['atoms'].loc[i, 'bmass']
+
+  R['atoms'] = pd.concat([RA['atoms'],RB['atoms'].loc[selB]], ignore_index=True)
+  R['atoms'].index = R['atoms'].index + 1
+  R['atoms']['aid'] = R['atoms'].index
+
+  selBp = R['atoms'].index.difference(RA['atoms'].index).tolist()
+
+
+  # patch bonded terms
+  for k in ['bonds','pairs','angles','dihedrals','cmap']:
+    tmp = RB[k].isin(selB).astype('int')
+    RB[k]['state'] = tmp.iloc[:,:-1].sum(1)
+  #print (RB['dihedrals'])
+
+  Dict_map = {}
+  for i in range(len(selB)):
+    Dict_map[selB[i]] = selBp[i]
+  sel = []
+  for k in ['dihedrals','cmap']:
+    tmp = RB[k].query('state>0').index
+    # 2.1.0
+    if tmp.shape[0] > 0:
+      tmp = RB[k].iloc[tmp, :-2]
+      sel += np.unique(tmp).tolist()
+  for i in sel:
+    if i not in Dict_map.keys():
+      jud1 = R['atoms']['rid'] == DictAB[ RB['atoms'].loc[i,'rid'] ]
+      jud2 = R['atoms']['aname'] == RB['atoms'].loc[i,'aname']
+      tmp = R['atoms'].index[jud1 & jud2]
+      assert tmp.shape[0] == 1, Dict_map
+      Dict_map[i] = tmp[0]
+
+  for k in ['bonds','pairs','angles','dihedrals','cmap']:
+    tmp = RB[k].query('state>0').index
+    # 2.1.0
+    if tmp.shape[0] > 0:
+      tmpdf = RB[k].iloc[tmp, :-2].applymap(lambda x: Dict_map[x])
+      tmpdf['btype'] = RB[k].loc[tmp, 'btype']
+      R[k] = pd.concat([RA[k], tmpdf], ignore_index=True)
+    else:
+      R[k] = RA[k].copy()
+
+
+  # patch dihedrals multiplicity
+  BASH("sed 's/;.*$//g; /^$/d' %s > ffb.copy.itp" %ffb)
+  tmplist = []
+  tmp = R['dihedrals'].isin(selA+selBp).astype('int')
+  R['dihedrals']['state'] = tmp.id1 + tmp.id2 + tmp.id3 + tmp.id4
+  for i in R['dihedrals'].query('state>0').index:
+   if R['dihedrals'].loc[i, 'btype'] == 9:
+    a1 = R['atoms'].loc[R['dihedrals'].loc[i,'id1'], 'atype'].replace('DUM_','')
+    a2 = R['atoms'].loc[R['dihedrals'].loc[i,'id2'], 'atype'].replace('DUM_','')
+    a3 = R['atoms'].loc[R['dihedrals'].loc[i,'id3'], 'atype'].replace('DUM_','')
+    a4 = R['atoms'].loc[R['dihedrals'].loc[i,'id4'], 'atype'].replace('DUM_','')
+    cmd = 'grep " %s * %s * %s * %s " ffb.copy.itp | wc -l' %(a1,a2,a3,a4)
+    tmpa = int(subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout)
+    cmd = 'grep " %s * %s * %s * %s " ffb.copy.itp | wc -l' %(a4,a3,a2,a1)
+    tmpb = int(subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout)
+    if a1==a4 and a2==a3: tmpb = 0
+    if tmpa+tmpb > 1 and tmpa*tmpb == 0 :
+      if tmpb == 0:
+        cmd = 'grep " %s * %s * %s * %s " ffb.copy.itp' %(a1,a2,a3,a4)
+        tmpc = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
+      else:
+        cmd = 'grep " %s * %s * %s * %s " ffb.copy.itp' %(a4,a3,a2,a1)
+        tmpc = subprocess.run(cmd, check=True, shell=True, stdout=subprocess.PIPE).stdout
+      for l in tmpc.splitlines():
+        l = str(l)[:-1]
+        tmps = R['dihedrals'].loc[i]
+        para = l[l.find(' 9 ')+3:]
+        tmps['para'] = para *2
+        tmplist.append(tmps)
+      R['dihedrals'].drop(i, inplace=True)
+  R['dihedrals'] = pd.concat([R['dihedrals'], pd.DataFrame(tmplist)], ignore_index=True)
+  R['dihedrals'].drop('state', axis=1, inplace=True)
+
+
+  # patch exclusions 
+  if args.excall or len(mutidA) != len(mutidB) :
+    R['exclusions'] += [[x]+selBp for x in selA]
+  else:
+    ridA = R['atoms'].loc[selA,  'rid']
+    ridB = R['atoms'].loc[selBp, 'rid']
+    for i in mutidA:
+      tmpA = ridA[ridA == i].index.tolist()
+      tmpB = ridB[ridB == i].index.tolist()
+      R['exclusions'] += [[x]+tmpB for x in tmpA]
+
+
+  # patch posres
+  R['position_restraints'].append('#ifdef POSRES\n')
+  R['position_restraints'].append(' #ifndef PEP\n')
+  R['position_restraints'].append(' #define PEP 0.1\n') # 1.4.0
+  R['position_restraints'].append(' #endif\n')
+  R['position_restraints'].append(' #ifndef MUT\n')
+  R['position_restraints'].append(' #define MUT 0\n') # 1.4.0
+  R['position_restraints'].append(' #endif\n')
+  # 1.3.5
+  selMA = R['atoms'].query('mass>2').index.intersection(selA).tolist()
+  selMB = R['atoms'].query('bmass>2').index.intersection(selBp).tolist()
+  selM = selMA + selMB
+  selP = R['atoms'].query('mass>2').index.difference(selM).tolist()
+  R['position_restraints'] += ['  %d  1  PEP PEP PEP\n'%x for x in selP]
+  R['position_restraints'] += ['  %d  1  MUT MUT MUT\n'%x for x in selM]
+  R['position_restraints'].append('#endif\n')
+
+
+  # save dual topology
+  WriteITP(R, 'dualtop.itp')
+  logging.info('generating hybrid topology: dualtop.itp')
+
+
+
+  # find spliced site
+  mixbondlist = []
+  tmp = R['bonds'].isin(selA+selBp).astype('int')
+  R['bonds']['state'] = tmp.id1 + tmp.id2
+  for i in R['bonds'].query('state==1').index:
+    typea = R['atoms'].loc[R['bonds'].loc[i,'id1'], 'atype'].replace('DUM_','')
+    typeb = R['atoms'].loc[R['bonds'].loc[i,'id2'], 'atype'].replace('DUM_','')
+    #if tmp.loc[i,'id1']: typea = 'DUM_' + typea
+    #if tmp.loc[i,'id2']: typeb = 'DUM_' + typeb
+    #mixbondlist.append((typea,typeb))
+    if tmp.loc[i,'id1']: mixbondlist.append((typeb,typea))
+    else               : mixbondlist.append((typea,typeb))
+  mixbondset = set(mixbondlist)
+
+
+  # patch all DUM nonbonded term
+  List_DUM = R['atoms'].loc[selA,'btype'].tolist() + R['atoms'].loc[selBp,'atype'].tolist()
+  for x,y in mixbondset: List_DUM += ['DUM_'+x, 'DUM_'+y]
+  List_DUM = set(List_DUM)
+  with open('ffn.itp', 'w') as f:
+    f.write('[ atomtypes ]\n')
+    for i in List_DUM:
+      f.write(' %s 0 0 0 A 0 0\n' %i)
+  logging.info('generating hybrid nonbonded force field: ffn.itp')
+
+
+  # patch all DUM bonded term
+  BASH("cp ffb.copy.itp tmp")
+  for i in List_DUM:
+    j = i[4:]
+    BASH("sed -i 's/ "+j+" / DUM_"+j+" /g' tmp")
+  BASH("sed -n '/^\[/p; / DUM_/p' tmp > ffb.itp")
+
+  # patch mixed DUM bonded term
+  BASH("cp ffb.itp tmp.ffb")
+  for TA,TB in mixbondset:
+    # patch TA-TB left
+    BASH("sed -r -n '/^\[/p; / DUM_%s * DUM_%s /p' tmp.ffb > tmp.left" %(TA,TB))
+    BASH("sed -i -r 's/ DUM_(.*)( DUM_%s * DUM_%s )/ \\1\\2/' tmp.left" %(TA,TB))
+    BASH("sed -i -r 's/ DUM_(.*)( DUM_%s * DUM_%s )/ \\1\\2/' tmp.left" %(TA,TB))
+    BASH("sed -i -r 's/ DUM_%s ( *DUM_%s )/ %s \\1/' tmp.left" %(TA,TB,TA))
+    BASH("cat tmp.left >> ffb.itp")
+    # patch TB-TA right
+    #if TA==TB : continue
+    BASH("sed -r -n '/^\[/p; / DUM_%s * DUM_%s /p' tmp.ffb > tmp.right" %(TB,TA))
+    BASH("sed -i -r 's/( DUM_%s * DUM_%s .*) DUM_(.*)/\\1 \\2/' tmp.right" %(TB,TA))
+    BASH("sed -i -r 's/( DUM_%s * DUM_%s .*) DUM_(.*)/\\1 \\2/' tmp.right" %(TB,TA))
+    BASH("sed -i -r 's/( DUM_%s *) DUM_%s /\\1 %s /' tmp.right" %(TB,TA,TA))
+    BASH("cat tmp.right >> ffb.itp")
+  # patch improper dihedral in PRO  # 1.4.1
+  #print (List_DUM)
+  if args.ff == 'charmm36':
+    if 'DUM_CP1' in List_DUM and 'DUM_N' in List_DUM:
+      BASH('echo [ dihedraltypes ] >> ffb.itp')
+      BASH('echo DUM_N  C  DUM_CP1  DUM_CP3  2 0.0 0.0 >> ffb.itp')
+    if 'DUM_C' in List_DUM:
+      BASH('echo [ dihedraltypes ] >> ffb.itp')
+      BASH('echo N  DUM_C  CP1  CP3  2 0.0 0.0 >> ffb.itp')
+
+
+  # patch cmap
+  BASH('echo [ cmaptypes ] >> ffb.itp')
+  tmplist = []
+  tmp = R['cmap'].isin(selBp).astype('int')
+  R['cmap']['state'] = tmp.id1 + tmp.id2 + tmp.id3 + tmp.id4 + tmp.id5
+  for i in R['cmap'].query('state>0').index:
+    a1 = R['atoms'].loc[R['cmap'].loc[i,'id1'], 'atype']
+    a2 = R['atoms'].loc[R['cmap'].loc[i,'id2'], 'atype']
+    a3 = R['atoms'].loc[R['cmap'].loc[i,'id3'], 'atype']
+    a4 = R['atoms'].loc[R['cmap'].loc[i,'id4'], 'atype']
+    a5 = R['atoms'].loc[R['cmap'].loc[i,'id5'], 'atype']
+    tmplist.append('%s %s %s %s %s ' %(a1,a2,a3,a4,a5))
+  for l in set(tmplist):
+    lr = l.replace('DUM_','')
+    BASH('sed -n "/%s/,/^$/p" %s | sed "s/%s/%s/" >> ffb.itp' %(lr, ffc, lr, l))
+  logging.info('generating hybrid bonded force field: ffb.itp')
+
+  os.chdir(rpath)
+
+
+
+  # hybrid structure
+  # load conf A B
+  pdbA = 'pdb2gmx/conf.pdb'
+  if len(args.mutlabel) > 0 :
+    pdbB = '%s/pdb2gmx/conf.pdb' %(args.mutlabel)
+  else:
+    pdbB = pdbA
+
+  confA = md.load(pdbA)
+  confB = md.load(pdbB)
+
+  assert confA.top.to_fasta()[2] == args.seq, 'The sequence (--seq) and the structure (--ipdb) are not match!' # 2.0.1
+
+  for x in fep_list: os.makedirs('%s/%s/pdb2gmx' %(args.mutlabel,x), exist_ok=True) # 2.0.0
+
+
+  # patch conf
+  if args.stype == 'SC':
+    selX = confB.top.select('chainid 2 and sidechain and residue ' + ' '.join([str(x) for x in mutidB]) + ' and not name ' + ' '.join(bblist))
+  if args.stype == 'RES':
+    selX = confB.top.select('chainid 2 and residue ' + ' '.join([str(x) for x in mutidB]))
+  tabA = confA.top.to_dataframe()[0]
+  tabB = confB.top.to_dataframe()[0]
+  # 2.0.0
+  tabA1 = tabA.query('chainID<=2')
+  tabA2 = tabA.query('chainID>2')
+  tab = pd.concat([tabA1, tabB.loc[selX], tabA2], ignore_index=True)
+  confA.top = confA.top.from_dataframe(tab)
+  confA.xyz = np.concatenate([confA.xyz[:,tabA1.index], confB.xyz[:,selX], confA.xyz[:,tabA2.index]], axis=1)
+  conf_dict = {}
+  conf_dict['free'] = confA.atom_slice(confA.top.select('chainid 2'))
+  conf_dict['complex'] = confA.atom_slice(confA.top.select('chainid 0 1 2'))
+  conf_dict['trimer'] = confA
+
+
+  # 2.0.0
+  for x in fep_list:
+    os.chdir('%s/%s/%s/pdb2gmx' %(rpath, args.mutlabel, x))
+    logging.info('current path: %s' %(os.getcwd()))
+    conf_dict[x].save('conf.pdb')
+    logging.info('generating %s hybrid structure: conf.pdb' %x)
+    WriteTOP('topol.top', ff_path, dtpath, feptype=x)
+    logging.info('generating %s topology: topol.top' %x)
+    # box !!!
+    if args.trimer: BASH('echo System | gmx editconf -f conf.pdb -o box.gro -box 16 10 10 -princ')
+    else: BASH('gmx editconf -f conf.pdb -o box.gro -box 10 10 10')
+    #if args.developer: BASH('echo System | gmx editconf -f conf.pdb -o box.gro -box 16 8 8 -princ') # developer
+    ######
+    logging.info('building box: box.gro')
+    BASH('gmx solvate -cp box.gro -p topol.top -o solv.gro')
+    logging.info('adding solvent: solv.gro')
+    BASH('touch ions.mdp')
+    BASH('gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn 1')
+    BASH('echo SOL | gmx genion -s ions.tpr -p topol.top -o ions.gro -conc 0.15 -neutral')
+    logging.info('adding ions: ions.gro')
+    BASH('echo q | gmx make_ndx -f ions.gro')
+    logging.info('making index: index.ndx')
+
+
+else:
+  logging.info('structure and topology are existed')
+
+
+# FEP
+if True:
+  logging.info('FEP prepareing ...')
+  os.chdir(rpath)
+  logging.info('current path: %s' %(os.getcwd()))
+  if args.queue:
+    if args.qpath is None: args.qpath = os.environ['HOME']+'/Queue_fep'
+    if args.qclear and os.path.exists(args.qpath): shutil.rmtree(args.qpath)
+    os.makedirs(args.qpath, exist_ok=True)
+    #os.chmod(args.qpath, 0o777) # 2.2.0
+    logging.info('queue path: %s' %args.qpath)
+    #qid = 1000
+    qid_parent = args.qstart # 1.3.5
+  logging.info('FEP windows: %d' %args.win)
+  logging.info('FEP trial ID: %s' %args.trial) # 1.4.3
+  # make lambda !!!
+  #from scipy.stats.distributions import norm
+  #fepl = ' '.join(['%.4f'%x for x in norm.cdf(np.linspace(-4,4,args.win))])
+  fepl = ' '.join(['%.4f'%x for x in np.sin(np.linspace(-np.pi/2,np.pi/2,args.win))/2+0.5])
+  #if args.developer: fepl = ' '.join(['%.4f'%x for x in np.sin(np.linspace(-np.pi/2,np.pi/2,args.win))*0.9998/2+0.5])
+  #fepl = ' '.join(['%.4f'%x for x in np.sin(np.linspace(-np.pi/2,np.pi/2,args.win))*0.9998/2+0.5])
+  #######
+  logging.info('FEP lambda: %s' %fepl)
+  for j in args.qtype: # 1.3.5
+   for t in args.trial: # 1.4.3
+    for i in range(args.win):
+      tmp_path = '%s/%s/w%d.t%d/%02d' %(args.mutlabel, j, args.win, t, i) # 1.4.3
+      if os.path.exists(tmp_path): # 1.4.3
+        logging.info('%s  existed' %tmp_path)
+      else:
+        os.makedirs(tmp_path)
+        BASH('ln -f -s %s/%s/%s/pdb2gmx %s/pdb2gmx' %(rpath, args.mutlabel, j, tmp_path))
+        for x in workflow:
+          BASH('cat %s/%s.mdp %s/fep.mdp > %s/%s.mdp' %(args.mdp, x, args.mdp, tmp_path, x))
+          BASH('echo fep-lambdas = %s >> %s/%s.mdp' %(fepl, tmp_path, x))
+          BASH('echo init_lambda_state = %d >> %s/%s.mdp' %(i, tmp_path, x))
+        if args.rlist is not None: # 1.4.2
+          for s in ['rlist', 'rcoulomb', 'rvdw']:
+            BASH("sed -i '/^%s/c\%s = %f'  %s/*.mdp" %(s, s, args.rlist, tmp_path))
+        #if False and args.queue:
+        #  while os.path.exists('%s/%d' %(args.qpath, qid)) : qid += 1
+        #  BASH('echo %s/%s > %s/%d' %(rpath, tmp_path, args.qpath, qid))
+        #  logging.info('Queue %5d %s/%s' %(qid, rpath, tmp_path))
+    if args.queue:
+      while os.path.exists('%s/%d' %(args.qpath, qid_parent)) : qid_parent += 1
+      BASH('echo %s/%s > %s/%d' %(rpath, os.path.dirname(tmp_path), args.qpath, qid_parent))
+      #os.chmod('%s/%d' %(args.qpath, qid_parent), 0o666) # 2.2.0
+      logging.info('Queue %5d %s/%s' %(qid_parent, rpath, os.path.dirname(tmp_path)))
+

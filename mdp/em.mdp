@@ -1,0 +1,25 @@
+include		= 
+define		= -DPOSRES -DFLEXIBLE
+
+integrator	= steep
+emtol		= 500
+emstep      	= 0.01
+nsteps		= 10000
+
+cutoff-scheme   = Verlet
+nstlist		= 1
+ns-type		= grid
+pbc		= xyz
+
+coulombtype	= PME
+vdwtype		= Cut-off
+
+rlist		= 1.2
+rcoulomb	= 1.2
+rvdw		= 1.2
+
+nstenergy       = 0
+nstlog          = 0
+
+;constraints     = h-bonds
+

@@ -1,0 +1,52 @@
+
+System:
+ - HLA: A*02:06
+ - HHAT neoantigen: KQWLVWLFL
+ - TCR: 302TIL
+
+Mutation:
+ - W6B
+
+Key points:
+ - amber14sb force field
+ - unnatural residue
+ - FEP for ternary complex
+
+
+0. The necessary information of the target unnatural residue BTA (3-benzothienyl-alanine) has been updated to the "amber14sb force field" and the "zhongfep script".
+
+1. Change current path to the workplace.
+   > cd $WORKPATH
+
+2. Prepare for ternary complex.
+    Make a new directory.
+    > mkdir KQWLVWLFL.ternary
+    > cd KQWLVWLFL.ternary
+
+    Place the PDB file of the original structure in the directory, name it KQWLVWLFL.pdb.
+    > touch KQWLVWLFL.pdb
+
+    Place the PDB file of the target structure in the directory, name it KQWLVBLFL.pdb.
+    On account of unnatural residue BTA, the program is unable to generate the target structure automatically. Whereas, the program can read an existed target structure. You can model the target structure manually, or any other techniques. (e.g. KQWLVBLFL.pdb in this example)
+    > touch KQWLVBLFL.pdb
+
+    Prepare FEP only for ternary complex.
+    It is suggested to prepare ternary complex separately from binary complex, on account of saving costs and cross-reactivity systems.
+    > zhongfep.prepare -l W6B --trimer --qtype trimer --ff amber14sb -q
+    > cd ..
+
+3. Prepare for binary complex.
+    Make a new directory.
+    > mkdir KQWLVWLFL
+    > cd KQWLVWLFL
+
+    Place the PDB files of the original and the target structure in the directory.
+    > cp ../KQWLVWLFL.ternary/KQWLVWLFL.pdb .
+    > cp ../KQWLVWLFL.ternary/KQWLVBLFL.pdb .
+    Manually remove the TCR chains from the PDB files.
+    > touch KQWLVWLFL.pdb
+    > touch KQWLVBLFL.pdb
+
+    Prepare FEP for binary complex.
+    > zhongfep.prepare -l W6B --ff amber14sb -q
+    > cd ..
